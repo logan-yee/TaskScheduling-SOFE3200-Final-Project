@@ -11,10 +11,10 @@ if [[ -f "$LIB_DIR/utils.sh" ]]; then
 fi
 
 # Log levels
-readonly LOG_LEVEL_DEBUG=0
-readonly LOG_LEVEL_INFO=1
-readonly LOG_LEVEL_WARNING=2
-readonly LOG_LEVEL_ERROR=3
+LOG_LEVEL_DEBUG=0
+LOG_LEVEL_INFO=1
+LOG_LEVEL_WARNING=2
+LOG_LEVEL_ERROR=3
 
 # Default log directory
 LOG_DIR="${LOG_DIR:-${SCRIPT_DIR%/*}/logs}"

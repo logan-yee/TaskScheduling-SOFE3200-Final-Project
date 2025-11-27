@@ -1,0 +1,12 @@
+{
+  "id": "workflow_001",
+  "name": "Deployment Pipeline",
+  "tasks": [
+    {"task_id": "task_001", "dependencies": []},
+    {"task_id": "task_002", "dependencies": ["task_001"]},
+    {"task_id": "task_003", "dependencies": ["task_001", "task_002"]}
+  ],
+  "retry": {
+    "max_attempts": 2
+  }
+}
