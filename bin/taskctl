@@ -1,0 +1,311 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------- Paths ----------------
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPTS_DIR="$ROOT_DIR/scripts"
+CONFIG_DIR="$ROOT_DIR/config"
+LOGS_DIR="$ROOT_DIR/logs"
+
+TASKS_FILE="$CONFIG_DIR/tasks.json"
+WORKFLOWS_FILE="$CONFIG_DIR/workflows.json"
+NOTIFICATIONS_FILE="$CONFIG_DIR/notifications.json"
+
+TASK_EXECUTOR="$SCRIPTS_DIR/task_executor.sh"
+WORKFLOW_ENGINE="$SCRIPTS_DIR/workflow_engine.sh"
+SCHEDULER="$SCRIPTS_DIR/scheduler.sh"
+CRON_MANAGER="$SCRIPTS_DIR/cron_manager.sh"
+NOTIFY_SCRIPT="$SCRIPTS_DIR/notification.sh"
+
+# ---------------- Logging helpers ----------------
+
+if [[ -f "$SCRIPTS_DIR/logger.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "$SCRIPTS_DIR/logger.sh"
+else
+  log_info()  { echo "[INFO]  $*"; }
+  log_warn()  { echo "[WARN]  $*" >&2; }
+  log_error() { echo "[ERROR] $*" >&2; }
+fi
+
+# ---------------- Common helpers ----------------
+
+require_jq() {
+  if ! command -v jq >/dev/null 2>&1; then
+    log_error "jq is required but not installed. Install jq and try again."
+    exit 1
+  fi
+}
+
+ensure_file() {
+  local path="$1"
+  local desc="$2"
+  if [[ ! -f "$path" ]]; then
+    log_error "$desc not found: $path"
+    exit 1
+  fi
+}
+
+usage() {
+  cat <<EOF
+Usage: taskctl <command> [args...]
+
+Core commands:
+  taskctl list-tasks
+  taskctl list-workflows
+  taskctl run-task <task_id>
+  taskctl run-workflow <workflow_id>
+  taskctl status
+  taskctl logs [task_or_workflow_id]
+
+Planned (stubbed) commands:
+  taskctl add-task
+  taskctl remove-task <task_id>
+  taskctl add-workflow
+  taskctl configure
+
+Examples:
+  taskctl list-tasks
+  taskctl run-task wash_clothes
+  taskctl list-workflows
+  taskctl run-workflow workflow_laundry
+EOF
+}
+
+# ---------------- Commands: read-only stuff ----------------
+
+cmd_list_tasks() {
+  require_jq
+  ensure_file "$TASKS_FILE" "Tasks config"
+
+  log_info "Tasks defined in $TASKS_FILE"
+  jq -r '
+    .tasks // []
+    | if length == 0 then
+        "No tasks defined."
+      else
+        ( "ID\tNAME\tSCHEDULE_TYPE" ),
+        ( .[] | "\(.id)\t\(.name)\t\(.schedule.type // "n/a")" )
+      end
+  ' "$TASKS_FILE"
+}
+
+cmd_list_workflows() {
+  require_jq
+  ensure_file "$WORKFLOWS_FILE" "Workflows config"
+
+  log_info "Workflows defined in $WORKFLOWS_FILE"
+  jq -r '
+    .workflows // []
+    | if length == 0 then
+        "No workflows defined."
+      else
+        ( "ID\tNAME\tMAX_ATTEMPTS" ),
+        ( .[] | "\(.id)\t\(.name)\t\(.retry.max_attempts // 1)" )
+      end
+  ' "$WORKFLOWS_FILE"
+}
+
+cmd_status() {
+  # Very simple status for now – you can extend later to:
+  # - show next scheduled runs
+  # - show running PIDs, etc.
+  echo "Task Scheduling and Workflows System status:"
+  echo "  Root dir:     $ROOT_DIR"
+  echo "  Config dir:   $CONFIG_DIR"
+  echo "  Scripts dir:  $SCRIPTS_DIR"
+  echo "  Logs dir:     $LOGS_DIR"
+  echo
+  [[ -f "$SCHEDULER" ]] \
+    && echo "  Scheduler:    available ($SCHEDULER)" \
+    || echo "  Scheduler:    NOT IMPLEMENTED"
+  [[ -f "$WORKFLOW_ENGINE" ]] \
+    && echo "  Workflow eng: available ($WORKFLOW_ENGINE)" \
+    || echo "  Workflow eng: NOT IMPLEMENTED"
+  [[ -f "$TASK_EXECUTOR" ]] \
+    && echo "  Task exec:    available ($TASK_EXECUTOR)" \
+    || echo "  Task exec:    NOT IMPLEMENTED"
+}
+
+cmd_logs() {
+  local id="${1:-}"
+
+  if [[ ! -d "$LOGS_DIR" ]]; then
+    log_warn "Logs directory not found: $LOGS_DIR"
+    return 1
+  fi
+
+  if [[ -z "$id" ]]; then
+    echo "Available log files in $LOGS_DIR:"
+    ls -1 "$LOGS_DIR" || true
+    return 0
+  fi
+
+  # Simple convention: any log file containing the id
+  local matches=()
+  while IFS= read -r f; do
+    matches+=("$f")
+  done < <(ls -1 "$LOGS_DIR" 2>/dev/null | grep "$id" || true)
+
+  if ((${#matches[@]} == 0)); then
+    log_warn "No log files found for id: $id"
+    return 1
+  fi
+
+  for f in "${matches[@]}"; do
+    echo "===== $LOGS_DIR/$f ====="
+    tail -n 50 "$LOGS_DIR/$f" || true
+    echo
+  done
+}
+
+# ---------------- Commands: execution ----------------
+
+cmd_run_task() {
+  local task_id="${1:-}"
+  if [[ -z "$task_id" ]]; then
+    log_error "run-task requires a <task_id>"
+    echo
+    usage
+    exit 1
+  fi
+
+  ensure_file "$TASK_EXECUTOR" "Task executor script"
+  log_info "Running task '$task_id'..."
+  "$TASK_EXECUTOR" "$task_id"
+}
+
+cmd_run_workflow() {
+  local wf_id="${1:-}"
+  if [[ -z "$wf_id" ]]; then
+    log_error "run-workflow requires a <workflow_id>"
+    echo
+    usage
+    exit 1
+  fi
+
+  ensure_file "$WORKFLOW_ENGINE" "Workflow engine script"
+  log_info "Running workflow '$wf_id'..."
+  "$WORKFLOW_ENGINE" run-workflow "$wf_id"
+}
+
+# ---------------- Stubbed commands (for completeness) ----------------
+
+cmd_add_task() {
+  cat <<'EOF'
+[TODO] add-task is not yet implemented.
+
+For now, define tasks manually in config/tasks.json, e.g.:
+
+{
+  "tasks": [
+    {
+      "id": "wash_clothes",
+      "name": "Wash clothes",
+      "command": "bash -c 'echo Washing...; sleep 2'",
+      "schedule": {
+        "type": "manual"
+      },
+      "retry": {
+        "max_attempts": 1,
+        "delay": 60
+      },
+      "notifications": {
+        "on_success": false,
+        "on_failure": true
+      }
+    }
+  ]
+}
+
+EOF
+}
+
+cmd_remove_task() {
+  local task_id="${1:-}"
+  if [[ -z "$task_id" ]]; then
+    log_error "remove-task requires a <task_id>"
+    exit 1
+  fi
+  cat <<EOF
+[TODO] remove-task is not yet implemented via CLI.
+
+Please remove task '$task_id' manually from:
+  $TASKS_FILE
+EOF
+}
+
+cmd_add_workflow() {
+  cat <<'EOF'
+[TODO] add-workflow is not yet implemented.
+
+For now, define workflows manually in config/workflows.json, e.g.:
+
+{
+  "workflows": [
+    {
+      "id": "workflow_laundry",
+      "name": "Laundry Workflow",
+      "tasks": [
+        { "task_id": "wash_clothes", "dependencies": [] },
+        { "task_id": "dry_clothes",  "dependencies": ["wash_clothes"] },
+        { "task_id": "fold_clothes", "dependencies": ["dry_clothes"] }
+      ],
+      "retry": {
+        "max_attempts": 2
+      }
+    }
+  ]
+}
+
+EOF
+}
+
+cmd_configure() {
+  cat <<EOF
+[TODO] configure is not yet implemented.
+
+You can manually edit notification settings in:
+  $NOTIFICATIONS_FILE
+EOF
+}
+
+# ---------------- Main dispatcher ----------------
+
+main() {
+  local cmd="${1:-}"
+
+  if [[ -z "$cmd" ]]; then
+    usage
+    exit 1
+  fi
+
+  shift || true   # remove the command from args
+
+  case "$cmd" in
+    # implemented
+    list-tasks)     cmd_list_tasks "$@" ;;
+    list-workflows) cmd_list_workflows "$@" ;;
+    run-task)       cmd_run_task "$@" ;;
+    run-workflow)   cmd_run_workflow "$@" ;;
+    status)         cmd_status "$@" ;;
+    logs)           cmd_logs "$@" ;;
+
+    # stubbed (for project completeness)
+    add-task)       cmd_add_task "$@" ;;
+    remove-task)    cmd_remove_task "$@" ;;
+    add-workflow)   cmd_add_workflow "$@" ;;
+    configure)      cmd_configure "$@" ;;
+
+    -h|--help|help) usage ;;
+    *)
+      log_error "Unknown command: $cmd"
+      echo
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
