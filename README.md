@@ -165,7 +165,7 @@ Commands:
 - Mark tasks as failed after max retries
 - Continue workflow execution where possible
 
-## Key Files to Create
+## Key Files
 
 1. **`bin/taskctl`** - Main CLI entry point with command parsing
 2. **`scripts/scheduler.sh`** - Core scheduling daemon
