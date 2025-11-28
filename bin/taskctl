@@ -84,13 +84,42 @@ init_json_file() {
   fi
 }
 
-# Check if task exists
+# Normalize tasks.json to array format (convert from {"tasks": [...]} if needed)
+normalize_tasks_file() {
+  if [[ ! -f "$TASKS_FILE" ]]; then
+    return 0
+  fi
+  
+  # Check if file is in object format {"tasks": [...]}
+  if jq -e '.tasks' "$TASKS_FILE" >/dev/null 2>&1; then
+    log_info "Converting tasks.json from object format to array format"
+    local backup="${TASKS_FILE}.convert.$$"
+    cp "$TASKS_FILE" "$backup"
+    if jq '.tasks // []' "$backup" > "$TASKS_FILE" 2>/dev/null; then
+      rm -f "$backup"
+      log_info "Converted tasks.json to array format"
+    else
+      mv "$backup" "$TASKS_FILE"
+      log_error "Failed to convert tasks.json format"
+      return 1
+    fi
+  fi
+  
+  # Ensure it's a valid array
+  if ! jq -e 'type == "array"' "$TASKS_FILE" >/dev/null 2>&1; then
+    log_warn "tasks.json is not a valid array, initializing as empty array"
+    echo "[]" > "$TASKS_FILE"
+  fi
+}
+
+# Check if task exists (handles both array and object formats)
 task_exists() {
   local task_id="$1"
   if [[ ! -f "$TASKS_FILE" ]]; then
     return 1
   fi
-  jq -e --arg id "$task_id" '.[] | select(.id == $id) | length' "$TASKS_FILE" >/dev/null 2>&1
+  # Try array format first, then object format
+  jq -e --arg id "$task_id" '(.[] // .tasks[]?) | select(.id == $id) | length' "$TASKS_FILE" >/dev/null 2>&1
 }
 
 # Check if workflow exists
@@ -181,6 +210,9 @@ cmd_list_tasks() {
     return 0
   fi
   
+  # Normalize to array format if needed
+  normalize_tasks_file
+  
   local task_count=$(jq 'length' "$TASKS_FILE" 2>/dev/null || echo "0")
   
   if [[ "$task_count" == "0" ]]; then
@@ -223,6 +255,7 @@ cmd_add_task() {
   require_jq
   ensure_config_dir
   init_json_file "$TASKS_FILE" "tasks"
+  normalize_tasks_file
   
   log_info "Adding a new task (interactive mode)"
   echo
@@ -347,9 +380,19 @@ cmd_add_task() {
     exit 1
   fi
   
-  # Validate backup file is valid JSON
-  if ! jq empty "$backup" 2>/dev/null; then
-    log_error "Backup file is not valid JSON. Initializing as empty array."
+  # Normalize backup to ensure it's an array (convert from {"tasks": [...]} if needed)
+  if jq -e '.tasks' "$backup" >/dev/null 2>&1; then
+    if ! jq '.tasks // []' "$backup" > "${backup}.tmp" 2>/dev/null; then
+      log_error "Failed to normalize backup file format"
+      rm -f "$backup" "${backup}.tmp"
+      exit 1
+    fi
+    mv "${backup}.tmp" "$backup"
+  fi
+  
+  # Validate backup file is valid JSON array
+  if ! jq -e 'type == "array"' "$backup" >/dev/null 2>&1; then
+    log_error "Backup file is not a valid array. Initializing as empty array."
     echo "[]" > "$backup"
   fi
   
