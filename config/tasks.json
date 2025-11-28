@@ -1,0 +1,31 @@
+{
+  "tasks": [
+    {
+      "id": "wash_clothes",
+      "name": "Wash Clothes",
+      "description": "Run the washing machine cycle.",
+      "command": "bash -c 'echo \"[TASK] Washing clothes...\"; sleep 2'",
+      "schedule": { "type": "manual" },
+      "retry": { "max_attempts": 2, "delay": 5 },
+      "notifications": { "on_success": true, "on_failure": true }
+    },
+    {
+      "id": "dry_clothes",
+      "name": "Dry Clothes",
+      "description": "Move clothes to the dryer and run the drying cycle.",
+      "command": "bash -c 'echo \"[TASK] Drying clothes...\"; sleep 2'",
+      "schedule": { "type": "manual" },
+      "retry": { "max_attempts": 2, "delay": 5 },
+      "notifications": { "on_success": true, "on_failure": true }
+    },
+    {
+      "id": "fold_clothes",
+      "name": "Fold Clothes",
+      "description": "Fold clothes after they finish drying.",
+      "command": "bash -c 'echo \"[TASK] Folding clothes...\"; sleep 1'",
+      "schedule": { "type": "manual" },
+      "retry": { "max_attempts": 1, "delay": 3 },
+      "notifications": { "on_success": true, "on_failure": true }
+    }
+  ]
+}
