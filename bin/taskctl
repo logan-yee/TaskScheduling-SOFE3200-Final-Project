@@ -74,7 +74,12 @@ init_json_file() {
   local root_key="$2"
   
   if [[ ! -f "$file" ]]; then
-    echo "{\"$root_key\": []}" > "$file"
+    # For tasks.json, use array format; for workflows, use object with workflows array
+    if [[ "$file" == *"tasks.json" ]]; then
+      echo "[]" > "$file"
+    else
+      echo "{\"$root_key\": []}" > "$file"
+    fi
     log_info "Created $file"
   fi
 }
@@ -284,49 +289,58 @@ cmd_add_task() {
   local retry_delay=$(prompt_with_default "Retry delay (seconds)" "60")
   
   echo
-  local notify_success=$(prompt_yes_no "Notify on success?" "n")
-  local notify_failure=$(prompt_yes_no "Notify on failure?" "y")
-  
-  # Build task JSON
-  local task_json="{
-    \"id\": \"$task_id\",
-    \"name\": \"$task_name\",
-    \"command\": \"$command\",
-    \"schedule\": {
-      \"type\": \"$schedule_type\""
-  
-  if [[ -n "$schedule_time" ]]; then
-    task_json+=",
-      \"time\": \"$schedule_time\""
+  local notify_success_val="false"
+  if prompt_yes_no "Notify on success?" "n"; then
+    notify_success_val="true"
   fi
   
-  if [[ -n "$schedule_day" ]]; then
-    task_json+=",
-      \"day\": \"$schedule_day\""
+  local notify_failure_val="false"
+  if prompt_yes_no "Notify on failure?" "y"; then
+    notify_failure_val="true"
   fi
   
-  if [[ -n "$schedule_cron" ]]; then
-    task_json+=",
-      \"cron\": \"$schedule_cron\""
-  fi
-  
-  task_json+="
-    },
-    \"retry\": {
-      \"max_attempts\": $max_attempts,
-      \"delay\": $retry_delay
-    },
-    \"notifications\": {
-      \"on_success\": $notify_success,
-      \"on_failure\": $notify_failure
-    }
-  }"
-  
-  # Add task to file
+  # Build task JSON using jq to ensure proper formatting and escaping
   local backup="${TASKS_FILE}.bak.$$"
   cp "$TASKS_FILE" "$backup" 2>/dev/null || echo "[]" > "$backup"
   
-  if jq ". += [$task_json]" "$backup" > "${TASKS_FILE}.tmp.$$" 2>/dev/null; then
+  # Build schedule object using jq
+  local schedule_obj=$(jq -n \
+    --arg type "$schedule_type" \
+    --arg time "${schedule_time:-}" \
+    --arg day "${schedule_day:-}" \
+    --arg cron "${schedule_cron:-}" \
+    '{
+      type: $type
+    } + (if $time != "" then {time: $time} else {} end) + 
+      (if $day != "" then {day: $day} else {} end) + 
+      (if $cron != "" then {cron: $cron} else {} end)')
+  
+  # Use jq to build and add the task object
+  local task_obj=$(jq -n \
+    --arg id "$task_id" \
+    --arg name "$task_name" \
+    --arg command "$command" \
+    --argjson schedule "$schedule_obj" \
+    --argjson max_attempts "$max_attempts" \
+    --argjson delay "$retry_delay" \
+    --argjson notify_success "$notify_success_val" \
+    --argjson notify_failure "$notify_failure_val" \
+    '{
+      id: $id,
+      name: $name,
+      command: $command,
+      schedule: $schedule,
+      retry: {
+        max_attempts: $max_attempts,
+        delay: $delay
+      },
+      notifications: {
+        on_success: $notify_success,
+        on_failure: $notify_failure
+      }
+    }')
+  
+  if jq ". += [$task_obj]" "$backup" > "${TASKS_FILE}.tmp.$$" 2>/dev/null; then
     mv "${TASKS_FILE}.tmp.$$" "$TASKS_FILE"
     rm -f "$backup"
     log_info "Task '$task_id' added successfully"
