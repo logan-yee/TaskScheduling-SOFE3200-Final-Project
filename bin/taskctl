@@ -7,6 +7,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPTS_DIR="$ROOT_DIR/scripts"
 CONFIG_DIR="$ROOT_DIR/config"
 LOGS_DIR="$ROOT_DIR/logs"
+LIB_DIR="$ROOT_DIR/lib"
 
 TASKS_FILE="$CONFIG_DIR/tasks.json"
 WORKFLOWS_FILE="$CONFIG_DIR/workflows.json"
@@ -18,15 +19,26 @@ SCHEDULER="$SCRIPTS_DIR/scheduler.sh"
 CRON_MANAGER="$SCRIPTS_DIR/cron_manager.sh"
 NOTIFY_SCRIPT="$SCRIPTS_DIR/notification.sh"
 
-# ---------------- Logging helpers ----------------
+# ---------------- Source Libraries ----------------
+
+if [[ -f "$LIB_DIR/utils.sh" ]]; then
+  source "$LIB_DIR/utils.sh"
+fi
 
 if [[ -f "$SCRIPTS_DIR/logger.sh" ]]; then
-  # shellcheck disable=SC1091
   source "$SCRIPTS_DIR/logger.sh"
 else
   log_info()  { echo "[INFO]  $*"; }
   log_warn()  { echo "[WARN]  $*" >&2; }
   log_error() { echo "[ERROR] $*" >&2; }
+fi
+
+if [[ -f "$CRON_MANAGER" ]]; then
+  source "$CRON_MANAGER"
+fi
+
+if [[ -f "$NOTIFY_SCRIPT" ]]; then
+  source "$NOTIFY_SCRIPT"
 fi
 
 # ---------------- Common helpers ----------------
@@ -47,120 +59,505 @@ ensure_file() {
   fi
 }
 
+ensure_config_dir() {
+  if [[ ! -d "$CONFIG_DIR" ]]; then
+    mkdir -p "$CONFIG_DIR" || {
+      log_error "Failed to create config directory: $CONFIG_DIR"
+      exit 1
+    }
+  fi
+}
+
+# Initialize JSON file if it doesn't exist
+init_json_file() {
+  local file="$1"
+  local root_key="$2"
+  
+  if [[ ! -f "$file" ]]; then
+    echo "{\"$root_key\": []}" > "$file"
+    log_info "Created $file"
+  fi
+}
+
+# Check if task exists
+task_exists() {
+  local task_id="$1"
+  if [[ ! -f "$TASKS_FILE" ]]; then
+    return 1
+  fi
+  jq -e --arg id "$task_id" '.[] | select(.id == $id) | length' "$TASKS_FILE" >/dev/null 2>&1
+}
+
+# Check if workflow exists
+workflow_exists() {
+  local workflow_id="$1"
+  if [[ ! -f "$WORKFLOWS_FILE" ]]; then
+    return 1
+  fi
+  # Handle both array and single object formats
+  jq -e --arg id "$workflow_id" '(.workflows[]? // .[]? // .) | select(.id == $id) | length' "$WORKFLOWS_FILE" >/dev/null 2>&1
+}
+
+# Prompt for input with default
+prompt_with_default() {
+  local prompt="$1"
+  local default="$2"
+  local result
+  
+  if [[ -n "$default" ]]; then
+    read -p "$prompt [$default]: " result
+    echo "${result:-$default}"
+  else
+    read -p "$prompt: " result
+    echo "$result"
+  fi
+}
+
+# Prompt for yes/no
+prompt_yes_no() {
+  local prompt="$1"
+  local default="${2:-n}"
+  local result
+  
+  if [[ "$default" == "y" ]]; then
+    read -p "$prompt [Y/n]: " result
+    [[ "${result:-y}" == "y" ]] || [[ "${result:-y}" == "Y" ]]
+  else
+    read -p "$prompt [y/N]: " result
+    [[ "${result:-n}" == "y" ]] || [[ "${result:-n}" == "Y" ]]
+  fi
+}
+
 usage() {
   cat <<EOF
 Usage: taskctl <command> [args...]
 
-Core commands:
-  taskctl list-tasks
-  taskctl list-workflows
-  taskctl run-task <task_id>
-  taskctl run-workflow <workflow_id>
-  taskctl status
-  taskctl logs [task_or_workflow_id]
+Task Management:
+  taskctl list-tasks              List all tasks
+  taskctl add-task                Add a new task (interactive)
+  taskctl remove-task <id>        Remove a task
+  taskctl run-task <id>           Execute a task manually
+  taskctl show-task <id>          Show task details
 
-Planned (stubbed) commands:
-  taskctl add-task
-  taskctl remove-task <task_id>
-  taskctl add-workflow
-  taskctl configure
+Workflow Management:
+  taskctl list-workflows          List all workflows
+  taskctl add-workflow            Add a new workflow (interactive)
+  taskctl remove-workflow <id>     Remove a workflow
+  taskctl run-workflow <id>       Execute a workflow manually
+  taskctl show-workflow <id>      Show workflow details
+
+System Management:
+  taskctl status                  Show system status
+  taskctl logs [id]               View logs (task/workflow ID or all)
+  taskctl sync-cron               Sync cron jobs with task schedules
+  taskctl test-email [recipient]   Test email notification configuration
+
+Configuration:
+  taskctl configure               Configure notification settings
 
 Examples:
   taskctl list-tasks
-  taskctl run-task wash_clothes
-  taskctl list-workflows
-  taskctl run-workflow workflow_laundry
+  taskctl add-task
+  taskctl run-task task_001
+  taskctl status
+  taskctl logs task_001
+  taskctl sync-cron
 EOF
 }
 
-# ---------------- Commands: read-only stuff ----------------
+# ---------------- Commands: Task Management ----------------
 
 cmd_list_tasks() {
   require_jq
-  ensure_file "$TASKS_FILE" "Tasks config"
-
-  log_info "Tasks defined in $TASKS_FILE"
+  ensure_config_dir
+  
+  if [[ ! -f "$TASKS_FILE" ]]; then
+    log_info "No tasks file found. Use 'taskctl add-task' to create one."
+    return 0
+  fi
+  
+  local task_count=$(jq 'length' "$TASKS_FILE" 2>/dev/null || echo "0")
+  
+  if [[ "$task_count" == "0" ]]; then
+    log_info "No tasks defined."
+    return 0
+  fi
+  
+  log_info "Tasks (${task_count} total):"
+  echo
   jq -r '
-    .tasks // []
-    | if length == 0 then
-        "No tasks defined."
-      else
-        ( "ID\tNAME\tSCHEDULE_TYPE" ),
-        ( .[] | "\(.id)\t\(.name)\t\(.schedule.type // "n/a")" )
-      end
-  ' "$TASKS_FILE"
+    .[]
+    | "ID: \(.id)
+Name: \(.name)
+Command: \(.command)
+Schedule: \(.schedule.type // "manual")\(if .schedule.time then " at \(.schedule.time)" else "" end)
+Retry: \(.retry.max_attempts // 1) attempts, \(.retry.delay // 60)s delay
+Notifications: Success=\(.notifications.on_success // false), Failure=\(.notifications.on_failure // false)
+---"
+  ' "$TASKS_FILE" 2>/dev/null
 }
+
+cmd_show_task() {
+  local task_id="${1:-}"
+  if [[ -z "$task_id" ]]; then
+    log_error "show-task requires a <task_id>"
+    exit 1
+  fi
+  
+  require_jq
+  
+  if ! task_exists "$task_id"; then
+    log_error "Task '$task_id' not found"
+    exit 1
+  fi
+  
+  jq -r --arg id "$task_id" '.[] | select(.id == $id)' "$TASKS_FILE" | jq '.'
+}
+
+cmd_add_task() {
+  require_jq
+  ensure_config_dir
+  init_json_file "$TASKS_FILE" "tasks"
+  
+  log_info "Adding a new task (interactive mode)"
+  echo
+  
+  # Get task details
+  local task_id=$(prompt_with_default "Task ID" "")
+  if [[ -z "$task_id" ]]; then
+    log_error "Task ID is required"
+    exit 1
+  fi
+  
+  if task_exists "$task_id"; then
+    log_error "Task '$task_id' already exists"
+    exit 1
+  fi
+  
+  local task_name=$(prompt_with_default "Task name" "$task_id")
+  local command=$(prompt_with_default "Command to execute" "")
+  if [[ -z "$command" ]]; then
+    log_error "Command is required"
+    exit 1
+  fi
+  
+  echo
+  echo "Schedule type:"
+  echo "  1) manual - Run only when manually triggered"
+  echo "  2) daily - Run daily at a specific time"
+  echo "  3) weekly - Run weekly on a specific day"
+  echo "  4) monthly - Run monthly on a specific day"
+  echo "  5) cron - Use custom cron expression"
+  local schedule_choice=$(prompt_with_default "Choose schedule type (1-5)" "1")
+  
+  local schedule_type="manual"
+  local schedule_time=""
+  local schedule_day=""
+  local schedule_cron=""
+  
+  case "$schedule_choice" in
+    2)
+      schedule_type="daily"
+      schedule_time=$(prompt_with_default "Time (HH:MM)" "00:00")
+      ;;
+    3)
+      schedule_type="weekly"
+      schedule_day=$(prompt_with_default "Day of week (0-6, 0=Sunday)" "0")
+      schedule_time=$(prompt_with_default "Time (HH:MM)" "00:00")
+      ;;
+    4)
+      schedule_type="monthly"
+      schedule_day=$(prompt_with_default "Day of month (1-31)" "1")
+      schedule_time=$(prompt_with_default "Time (HH:MM)" "00:00")
+      ;;
+    5)
+      schedule_type="cron"
+      schedule_cron=$(prompt_with_default "Cron expression (min hour day month weekday)" "0 0 * * *")
+      ;;
+    *)
+      schedule_type="manual"
+      ;;
+  esac
+  
+  echo
+  local max_attempts=$(prompt_with_default "Max retry attempts" "3")
+  local retry_delay=$(prompt_with_default "Retry delay (seconds)" "60")
+  
+  echo
+  local notify_success=$(prompt_yes_no "Notify on success?" "n")
+  local notify_failure=$(prompt_yes_no "Notify on failure?" "y")
+  
+  # Build task JSON
+  local task_json="{
+    \"id\": \"$task_id\",
+    \"name\": \"$task_name\",
+    \"command\": \"$command\",
+    \"schedule\": {
+      \"type\": \"$schedule_type\""
+  
+  if [[ -n "$schedule_time" ]]; then
+    task_json+=",
+      \"time\": \"$schedule_time\""
+  fi
+  
+  if [[ -n "$schedule_day" ]]; then
+    task_json+=",
+      \"day\": \"$schedule_day\""
+  fi
+  
+  if [[ -n "$schedule_cron" ]]; then
+    task_json+=",
+      \"cron\": \"$schedule_cron\""
+  fi
+  
+  task_json+="
+    },
+    \"retry\": {
+      \"max_attempts\": $max_attempts,
+      \"delay\": $retry_delay
+    },
+    \"notifications\": {
+      \"on_success\": $notify_success,
+      \"on_failure\": $notify_failure
+    }
+  }"
+  
+  # Add task to file
+  local backup="${TASKS_FILE}.bak.$$"
+  cp "$TASKS_FILE" "$backup" 2>/dev/null || echo "[]" > "$backup"
+  
+  if jq ". += [$task_json]" "$backup" > "${TASKS_FILE}.tmp.$$" 2>/dev/null; then
+    mv "${TASKS_FILE}.tmp.$$" "$TASKS_FILE"
+    rm -f "$backup"
+    log_info "Task '$task_id' added successfully"
+    
+    # Sync cron if scheduled
+    if [[ "$schedule_type" != "manual" ]] && [[ -f "$CRON_MANAGER" ]]; then
+      if prompt_yes_no "Sync cron jobs now?" "y"; then
+        source "$CRON_MANAGER"
+        sync_cron_jobs
+      fi
+    fi
+  else
+    mv "$backup" "$TASKS_FILE" 2>/dev/null
+    log_error "Failed to add task"
+    exit 1
+  fi
+}
+
+cmd_remove_task() {
+  local task_id="${1:-}"
+  if [[ -z "$task_id" ]]; then
+    log_error "remove-task requires a <task_id>"
+    exit 1
+  fi
+  
+  require_jq
+  
+  if ! task_exists "$task_id"; then
+    log_error "Task '$task_id' not found"
+    exit 1
+  fi
+  
+  if ! prompt_yes_no "Remove task '$task_id'?" "n"; then
+    log_info "Cancelled"
+    return 0
+  fi
+  
+  local backup="${TASKS_FILE}.bak.$$"
+  cp "$TASKS_FILE" "$backup"
+  
+  if jq --arg id "$task_id" 'map(select(.id != $id))' "$backup" > "${TASKS_FILE}.tmp.$$" 2>/dev/null; then
+    mv "${TASKS_FILE}.tmp.$$" "$TASKS_FILE"
+    rm -f "$backup"
+    log_info "Task '$task_id' removed"
+    
+    # Remove cron job if exists
+    if [[ -f "$CRON_MANAGER" ]]; then
+      source "$CRON_MANAGER"
+      remove_cron_job "$task_id" 2>/dev/null || true
+    fi
+  else
+    mv "$backup" "$TASKS_FILE" 2>/dev/null
+    log_error "Failed to remove task"
+    exit 1
+  fi
+}
+
+# ---------------- Commands: Workflow Management ----------------
 
 cmd_list_workflows() {
   require_jq
-  ensure_file "$WORKFLOWS_FILE" "Workflows config"
-
-  log_info "Workflows defined in $WORKFLOWS_FILE"
-  jq -r '
-    .workflows // []
-    | if length == 0 then
-        "No workflows defined."
-      else
-        ( "ID\tNAME\tMAX_ATTEMPTS" ),
-        ( .[] | "\(.id)\t\(.name)\t\(.retry.max_attempts // 1)" )
-      end
-  ' "$WORKFLOWS_FILE"
-}
-
-cmd_status() {
-  # Very simple status for now – you can extend later to:
-  # - show next scheduled runs
-  # - show running PIDs, etc.
-  echo "Task Scheduling and Workflows System status:"
-  echo "  Root dir:     $ROOT_DIR"
-  echo "  Config dir:   $CONFIG_DIR"
-  echo "  Scripts dir:  $SCRIPTS_DIR"
-  echo "  Logs dir:     $LOGS_DIR"
-  echo
-  [[ -f "$SCHEDULER" ]] \
-    && echo "  Scheduler:    available ($SCHEDULER)" \
-    || echo "  Scheduler:    NOT IMPLEMENTED"
-  [[ -f "$WORKFLOW_ENGINE" ]] \
-    && echo "  Workflow eng: available ($WORKFLOW_ENGINE)" \
-    || echo "  Workflow eng: NOT IMPLEMENTED"
-  [[ -f "$TASK_EXECUTOR" ]] \
-    && echo "  Task exec:    available ($TASK_EXECUTOR)" \
-    || echo "  Task exec:    NOT IMPLEMENTED"
-}
-
-cmd_logs() {
-  local id="${1:-}"
-
-  if [[ ! -d "$LOGS_DIR" ]]; then
-    log_warn "Logs directory not found: $LOGS_DIR"
-    return 1
-  fi
-
-  if [[ -z "$id" ]]; then
-    echo "Available log files in $LOGS_DIR:"
-    ls -1 "$LOGS_DIR" || true
+  ensure_config_dir
+  
+  if [[ ! -f "$WORKFLOWS_FILE" ]]; then
+    log_info "No workflows file found. Use 'taskctl add-workflow' to create one."
     return 0
   fi
-
-  # Simple convention: any log file containing the id
-  local matches=()
-  while IFS= read -r f; do
-    matches+=("$f")
-  done < <(ls -1 "$LOGS_DIR" 2>/dev/null | grep "$id" || true)
-
-  if ((${#matches[@]} == 0)); then
-    log_warn "No log files found for id: $id"
-    return 1
+  
+  # Handle both array and single object formats
+  local workflows=$(jq -c '.workflows[]? // .[]? // .' "$WORKFLOWS_FILE" 2>/dev/null)
+  
+  if [[ -z "$workflows" ]] || [[ "$workflows" == "null" ]]; then
+    log_info "No workflows defined."
+    return 0
   fi
-
-  for f in "${matches[@]}"; do
-    echo "===== $LOGS_DIR/$f ====="
-    tail -n 50 "$LOGS_DIR/$f" || true
-    echo
-  done
+  
+  log_info "Workflows:"
+  echo
+  jq -r '
+    (.workflows[]? // .[]? // .)
+    | "ID: \(.id)
+Name: \(.name)
+Tasks: \(.tasks | length) task(s)
+Max Attempts: \(.retry.max_attempts // 1)
+---"
+  ' "$WORKFLOWS_FILE" 2>/dev/null
 }
 
-# ---------------- Commands: execution ----------------
+cmd_show_workflow() {
+  local workflow_id="${1:-}"
+  if [[ -z "$workflow_id" ]]; then
+    log_error "show-workflow requires a <workflow_id>"
+    exit 1
+  fi
+  
+  require_jq
+  
+  if ! workflow_exists "$workflow_id"; then
+    log_error "Workflow '$workflow_id' not found"
+    exit 1
+  fi
+  
+  jq -r --arg id "$workflow_id" '(.workflows[]? // .[]? // .) | select(.id == $id)' "$WORKFLOWS_FILE" | jq '.'
+}
+
+cmd_add_workflow() {
+  require_jq
+  ensure_config_dir
+  
+  log_info "Adding a new workflow (interactive mode)"
+  echo
+  
+  local workflow_id=$(prompt_with_default "Workflow ID" "")
+  if [[ -z "$workflow_id" ]]; then
+    log_error "Workflow ID is required"
+    exit 1
+  fi
+  
+  if workflow_exists "$workflow_id"; then
+    log_error "Workflow '$workflow_id' already exists"
+    exit 1
+  fi
+  
+  local workflow_name=$(prompt_with_default "Workflow name" "$workflow_id")
+  local max_attempts=$(prompt_with_default "Max retry attempts" "2")
+  
+  echo
+  log_info "Adding tasks to workflow (enter empty task ID to finish)"
+  
+  local tasks_json="[]"
+  while true; do
+    local task_id=$(prompt_with_default "Task ID" "")
+    if [[ -z "$task_id" ]]; then
+      break
+    fi
+    
+    # Verify task exists
+    if [[ ! -f "$TASKS_FILE" ]] || ! task_exists "$task_id"; then
+      log_warn "Task '$task_id' not found. Skipping..."
+      continue
+    fi
+    
+    echo "Dependencies for task '$task_id' (comma-separated, or empty for none):"
+    read -p "> " deps_input
+    
+    local deps_array="[]"
+    if [[ -n "$deps_input" ]]; then
+      IFS=',' read -ra DEPS <<< "$deps_input"
+      local deps_list=""
+      for dep in "${DEPS[@]}"; do
+        dep=$(echo "$dep" | xargs)  # trim whitespace
+        if [[ -n "$dep" ]]; then
+          if [[ -z "$deps_list" ]]; then
+            deps_list="\"$dep\""
+          else
+            deps_list="$deps_list, \"$dep\""
+          fi
+        fi
+      done
+      if [[ -n "$deps_list" ]]; then
+        deps_array="[$deps_list]"
+      fi
+    fi
+    
+    local task_entry="{\"task_id\": \"$task_id\", \"dependencies\": $deps_array}"
+    tasks_json=$(echo "$tasks_json" | jq ". += [$task_entry]")
+  done
+  
+  # Build workflow JSON
+  local workflow_json="{
+    \"id\": \"$workflow_id\",
+    \"name\": \"$workflow_name\",
+    \"tasks\": $(echo "$tasks_json" | jq -c '.'),
+    \"retry\": {
+      \"max_attempts\": $max_attempts
+    }
+  }"
+  
+  # Add workflow to file
+  if [[ ! -f "$WORKFLOWS_FILE" ]]; then
+    echo "{\"workflows\": []}" > "$WORKFLOWS_FILE"
+  fi
+  
+  local backup="${WORKFLOWS_FILE}.bak.$$"
+  cp "$WORKFLOWS_FILE" "$backup"
+  
+  if jq ".workflows += [$workflow_json]" "$backup" > "${WORKFLOWS_FILE}.tmp.$$" 2>/dev/null; then
+    mv "${WORKFLOWS_FILE}.tmp.$$" "$WORKFLOWS_FILE"
+    rm -f "$backup"
+    log_info "Workflow '$workflow_id' added successfully"
+  else
+    mv "$backup" "$WORKFLOWS_FILE" 2>/dev/null
+    log_error "Failed to add workflow"
+    exit 1
+  fi
+}
+
+cmd_remove_workflow() {
+  local workflow_id="${1:-}"
+  if [[ -z "$workflow_id" ]]; then
+    log_error "remove-workflow requires a <workflow_id>"
+    exit 1
+  fi
+  
+  require_jq
+  
+  if ! workflow_exists "$workflow_id"; then
+    log_error "Workflow '$workflow_id' not found"
+    exit 1
+  fi
+  
+  if ! prompt_yes_no "Remove workflow '$workflow_id'?" "n"; then
+    log_info "Cancelled"
+    return 0
+  fi
+  
+  local backup="${WORKFLOWS_FILE}.bak.$$"
+  cp "$WORKFLOWS_FILE" "$backup"
+  
+  if jq --arg id "$workflow_id" '.workflows = (.workflows // []) | map(select(.id != $id))' "$backup" > "${WORKFLOWS_FILE}.tmp.$$" 2>/dev/null; then
+    mv "${WORKFLOWS_FILE}.tmp.$$" "$WORKFLOWS_FILE"
+    rm -f "$backup"
+    log_info "Workflow '$workflow_id' removed"
+  else
+    mv "$backup" "$WORKFLOWS_FILE" 2>/dev/null
+    log_error "Failed to remove workflow"
+    exit 1
+  fi
+}
+
+# ---------------- Commands: Execution ----------------
 
 cmd_run_task() {
   local task_id="${1:-}"
@@ -170,10 +567,10 @@ cmd_run_task() {
     usage
     exit 1
   fi
-
+  
   ensure_file "$TASK_EXECUTOR" "Task executor script"
   log_info "Running task '$task_id'..."
-  "$TASK_EXECUTOR" "$task_id"
+  "$TASK_EXECUTOR" "$task_id" true
 }
 
 cmd_run_workflow() {
@@ -184,121 +581,260 @@ cmd_run_workflow() {
     usage
     exit 1
   fi
-
+  
   ensure_file "$WORKFLOW_ENGINE" "Workflow engine script"
   log_info "Running workflow '$wf_id'..."
   "$WORKFLOW_ENGINE" run-workflow "$wf_id"
 }
 
-# ---------------- Stubbed commands (for completeness) ----------------
+# ---------------- Commands: System Management ----------------
 
-cmd_add_task() {
-  cat <<'EOF'
-[TODO] add-task is not yet implemented.
-
-For now, define tasks manually in config/tasks.json, e.g.:
-
-{
-  "tasks": [
-    {
-      "id": "wash_clothes",
-      "name": "Wash clothes",
-      "command": "bash -c 'echo Washing...; sleep 2'",
-      "schedule": {
-        "type": "manual"
-      },
-      "retry": {
-        "max_attempts": 1,
-        "delay": 60
-      },
-      "notifications": {
-        "on_success": false,
-        "on_failure": true
-      }
-    }
-  ]
+cmd_status() {
+  echo "Task Scheduling and Workflows System Status"
+  echo "=========================================="
+  echo
+  echo "Directories:"
+  echo "  Root:      $ROOT_DIR"
+  echo "  Config:    $CONFIG_DIR"
+  echo "  Scripts:   $SCRIPTS_DIR"
+  echo "  Logs:      $LOGS_DIR"
+  echo "  Lib:       $LIB_DIR"
+  echo
+  
+  echo "Components:"
+  [[ -f "$SCHEDULER" ]] \
+    && echo "  ✓ Scheduler:    $SCHEDULER" \
+    || echo "  ✗ Scheduler:    NOT IMPLEMENTED"
+  [[ -f "$WORKFLOW_ENGINE" ]] \
+    && echo "  ✓ Workflow:     $WORKFLOW_ENGINE" \
+    || echo "  ✗ Workflow:     NOT IMPLEMENTED"
+  [[ -f "$TASK_EXECUTOR" ]] \
+    && echo "  ✓ Task Exec:    $TASK_EXECUTOR" \
+    || echo "  ✗ Task Exec:    NOT IMPLEMENTED"
+  [[ -f "$CRON_MANAGER" ]] \
+    && echo "  ✓ Cron Manager: $CRON_MANAGER" \
+    || echo "  ✗ Cron Manager: NOT FOUND"
+  [[ -f "$NOTIFY_SCRIPT" ]] \
+    && echo "  ✓ Notifications: $NOTIFY_SCRIPT" \
+    || echo "  ✗ Notifications: NOT FOUND"
+  echo
+  
+  # Task count
+  if [[ -f "$TASKS_FILE" ]] && command -v jq >/dev/null 2>&1; then
+    local task_count=$(jq 'length' "$TASKS_FILE" 2>/dev/null || echo "0")
+    echo "Tasks: $task_count defined"
+  else
+    echo "Tasks: N/A"
+  fi
+  
+  # Workflow count
+  if [[ -f "$WORKFLOWS_FILE" ]] && command -v jq >/dev/null 2>&1; then
+    local wf_count=$(jq '.workflows | length' "$WORKFLOWS_FILE" 2>/dev/null || jq 'length' "$WORKFLOWS_FILE" 2>/dev/null || echo "0")
+    echo "Workflows: $wf_count defined"
+  else
+    echo "Workflows: N/A"
+  fi
+  
+  # Email status
+  echo
+  if [[ -f "$NOTIFY_SCRIPT" ]]; then
+    source "$NOTIFY_SCRIPT"
+    if is_email_available; then
+      local mail_cmd=$(get_mail_command)
+      echo "Email: Available ($mail_cmd)"
+    else
+      echo "Email: Not available (no mail command found)"
+    fi
+  else
+    echo "Email: Status unknown"
+  fi
+  
+  # Cron status
+  echo
+  if [[ -f "$CRON_MANAGER" ]]; then
+    source "$CRON_MANAGER"
+    if is_cron_available; then
+      echo "Cron: Available"
+      local cron_count=$(list_cron_jobs 2>/dev/null | wc -l)
+      echo "  Managed cron jobs: $cron_count"
+    else
+      echo "Cron: Not available"
+    fi
+  else
+    echo "Cron: Status unknown"
+  fi
 }
 
-EOF
+cmd_logs() {
+  local id="${1:-}"
+  
+  if [[ ! -d "$LOGS_DIR" ]]; then
+    log_warn "Logs directory not found: $LOGS_DIR"
+    return 1
+  fi
+  
+  if [[ -z "$id" ]]; then
+    echo "Available log files in $LOGS_DIR:"
+    find "$LOGS_DIR" -type f -name "*.log*" -o -name "*.txt" | sort
+    return 0
+  fi
+  
+  # Try to find log files for this ID
+  local log_file=""
+  
+  # Check task logs
+  if [[ -f "$LOGS_DIR/tasks/${id}.log" ]]; then
+    log_file="$LOGS_DIR/tasks/${id}.log"
+  elif [[ -f "$LOGS_DIR/${id}.log" ]]; then
+    log_file="$LOGS_DIR/${id}.log"
+  else
+    # Search for any log containing the ID
+    log_file=$(find "$LOGS_DIR" -type f \( -name "*${id}*" -o -name "scheduler.log" \) | head -1)
+  fi
+  
+  if [[ -n "$log_file" ]] && [[ -f "$log_file" ]]; then
+    echo "===== $log_file ====="
+    if command -v tail >/dev/null 2>&1; then
+      tail -n 100 "$log_file"
+    else
+      cat "$log_file"
+    fi
+  else
+    log_warn "No log files found for: $id"
+    return 1
+  fi
 }
 
-cmd_remove_task() {
-  local task_id="${1:-}"
-  if [[ -z "$task_id" ]]; then
-    log_error "remove-task requires a <task_id>"
+cmd_sync_cron() {
+  if [[ ! -f "$CRON_MANAGER" ]]; then
+    log_error "Cron manager not found: $CRON_MANAGER"
     exit 1
   fi
-  cat <<EOF
-[TODO] remove-task is not yet implemented via CLI.
-
-Please remove task '$task_id' manually from:
-  $TASKS_FILE
-EOF
+  
+  source "$CRON_MANAGER"
+  log_info "Syncing cron jobs with task schedules..."
+  sync_cron_jobs
+  log_info "Cron sync completed"
 }
 
-cmd_add_workflow() {
-  cat <<'EOF'
-[TODO] add-workflow is not yet implemented.
-
-For now, define workflows manually in config/workflows.json, e.g.:
-
-{
-  "workflows": [
-    {
-      "id": "workflow_laundry",
-      "name": "Laundry Workflow",
-      "tasks": [
-        { "task_id": "wash_clothes", "dependencies": [] },
-        { "task_id": "dry_clothes",  "dependencies": ["wash_clothes"] },
-        { "task_id": "fold_clothes", "dependencies": ["dry_clothes"] }
-      ],
-      "retry": {
-        "max_attempts": 2
-      }
-    }
-  ]
+cmd_test_email() {
+  local recipient="${1:-}"
+  
+  if [[ ! -f "$NOTIFY_SCRIPT" ]]; then
+    log_error "Notification script not found: $NOTIFY_SCRIPT"
+    exit 1
+  fi
+  
+  source "$NOTIFY_SCRIPT"
+  
+  if [[ -z "$recipient" ]]; then
+    if [[ -f "$NOTIFICATIONS_FILE" ]] && command -v jq >/dev/null 2>&1; then
+      recipient=$(jq -r '.recipients.default[0] // empty' "$NOTIFICATIONS_FILE" 2>/dev/null)
+    fi
+    
+    if [[ -z "$recipient" ]]; then
+      recipient=$(prompt_with_default "Recipient email/username" "")
+    fi
+  fi
+  
+  if [[ -z "$recipient" ]]; then
+    log_error "No recipient specified"
+    exit 1
+  fi
+  
+  test_email_config "$recipient"
 }
 
-EOF
-}
+# ---------------- Commands: Configuration ----------------
 
 cmd_configure() {
-  cat <<EOF
-[TODO] configure is not yet implemented.
-
-You can manually edit notification settings in:
-  $NOTIFICATIONS_FILE
-EOF
+  require_jq
+  ensure_config_dir
+  
+  log_info "Notification Configuration"
+  echo
+  
+  if [[ ! -f "$NOTIFICATIONS_FILE" ]]; then
+    echo "{}" > "$NOTIFICATIONS_FILE"
+  fi
+  
+  echo "Current recipients:"
+  jq -r '.recipients // {}' "$NOTIFICATIONS_FILE" 2>/dev/null || echo "{}"
+  echo
+  
+  echo "Configure notification recipients:"
+  local default_recipient=$(jq -r '.recipients.default[0] // ""' "$NOTIFICATIONS_FILE" 2>/dev/null)
+  local recipient=$(prompt_with_default "Default recipient (email/username)" "$default_recipient")
+  
+  if [[ -z "$recipient" ]]; then
+    log_error "Recipient is required"
+    exit 1
+  fi
+  
+  local success_recipient=$(prompt_with_default "Success notifications recipient (or same)" "$recipient")
+  local failure_recipient=$(prompt_with_default "Failure notifications recipient (or same)" "$recipient")
+  
+  # Build recipients JSON
+  local recipients_json="{
+    \"default\": [\"$recipient\"],
+    \"success\": [\"${success_recipient:-$recipient}\"],
+    \"failure\": [\"${failure_recipient:-$recipient}\"]
+  }"
+  
+  # Update config file
+  local backup="${NOTIFICATIONS_FILE}.bak.$$"
+  cp "$NOTIFICATIONS_FILE" "$backup"
+  
+  if jq ".recipients = $recipients_json" "$backup" > "${NOTIFICATIONS_FILE}.tmp.$$" 2>/dev/null; then
+    mv "${NOTIFICATIONS_FILE}.tmp.$$" "$NOTIFICATIONS_FILE"
+    rm -f "$backup"
+    log_info "Notification configuration updated"
+  else
+    mv "$backup" "$NOTIFICATIONS_FILE" 2>/dev/null
+    log_error "Failed to update configuration"
+    exit 1
+  fi
 }
 
 # ---------------- Main dispatcher ----------------
 
 main() {
   local cmd="${1:-}"
-
+  
   if [[ -z "$cmd" ]]; then
     usage
     exit 1
   fi
-
-  shift || true   # remove the command from args
-
+  
+  shift || true
+  
   case "$cmd" in
-    # implemented
-    list-tasks)     cmd_list_tasks "$@" ;;
-    list-workflows) cmd_list_workflows "$@" ;;
-    run-task)       cmd_run_task "$@" ;;
-    run-workflow)   cmd_run_workflow "$@" ;;
-    status)         cmd_status "$@" ;;
-    logs)           cmd_logs "$@" ;;
-
-    # stubbed (for project completeness)
+    # Task management
+    list-tasks)      cmd_list_tasks "$@" ;;
     add-task)       cmd_add_task "$@" ;;
     remove-task)    cmd_remove_task "$@" ;;
+    show-task)      cmd_show_task "$@" ;;
+    run-task)       cmd_run_task "$@" ;;
+    
+    # Workflow management
+    list-workflows) cmd_list_workflows "$@" ;;
     add-workflow)   cmd_add_workflow "$@" ;;
+    remove-workflow) cmd_remove_workflow "$@" ;;
+    show-workflow)  cmd_show_workflow "$@" ;;
+    run-workflow)   cmd_run_workflow "$@" ;;
+    
+    # System management
+    status)         cmd_status "$@" ;;
+    logs)           cmd_logs "$@" ;;
+    sync-cron)      cmd_sync_cron "$@" ;;
+    test-email)     cmd_test_email "$@" ;;
+    
+    # Configuration
     configure)      cmd_configure "$@" ;;
-
+    
+    # Help
     -h|--help|help) usage ;;
+    
     *)
       log_error "Unknown command: $cmd"
       echo
