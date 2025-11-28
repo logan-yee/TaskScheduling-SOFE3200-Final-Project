@@ -323,8 +323,8 @@ cmd_add_task() {
     --argjson schedule "$schedule_obj" \
     --argjson max_attempts "$max_attempts" \
     --argjson delay "$retry_delay" \
-    --argjson notify_success "$notify_success_val" \
-    --argjson notify_failure "$notify_failure_val" \
+    --arg notify_success "$notify_success_val" \
+    --arg notify_failure "$notify_failure_val" \
     '{
       id: $id,
       name: $name,
@@ -335,26 +335,55 @@ cmd_add_task() {
         delay: $delay
       },
       notifications: {
-        on_success: $notify_success,
-        on_failure: $notify_failure
+        on_success: ($notify_success == "true"),
+        on_failure: ($notify_failure == "true")
       }
     }')
   
-  if jq ". += [$task_obj]" "$backup" > "${TASKS_FILE}.tmp.$$" 2>/dev/null; then
-    mv "${TASKS_FILE}.tmp.$$" "$TASKS_FILE"
+  # Validate task_obj was created
+  if [[ -z "$task_obj" ]]; then
+    log_error "Failed to build task object"
     rm -f "$backup"
-    log_info "Task '$task_id' added successfully"
-    
-    # Sync cron if scheduled
-    if [[ "$schedule_type" != "manual" ]] && [[ -f "$CRON_MANAGER" ]]; then
-      if prompt_yes_no "Sync cron jobs now?" "y"; then
-        source "$CRON_MANAGER"
-        sync_cron_jobs
+    exit 1
+  fi
+  
+  # Validate backup file is valid JSON
+  if ! jq empty "$backup" 2>/dev/null; then
+    log_error "Backup file is not valid JSON. Initializing as empty array."
+    echo "[]" > "$backup"
+  fi
+  
+  # Add task to array
+  local tmp_file="${TASKS_FILE}.tmp.$$"
+  local jq_error=""
+  if jq ". += [$task_obj]" "$backup" > "$tmp_file" 2>"${TASKS_FILE}.jqerr.$$"; then
+    # Validate the result
+    if jq empty "$tmp_file" 2>/dev/null; then
+      mv "$tmp_file" "$TASKS_FILE"
+      rm -f "$backup" "${TASKS_FILE}.jqerr.$$"
+      log_info "Task '$task_id' added successfully"
+      
+      # Sync cron if scheduled
+      if [[ "$schedule_type" != "manual" ]] && [[ -f "$CRON_MANAGER" ]]; then
+        if prompt_yes_no "Sync cron jobs now?" "y"; then
+          source "$CRON_MANAGER"
+          sync_cron_jobs
+        fi
       fi
+    else
+      log_error "Generated invalid JSON"
+      jq_error=$(cat "${TASKS_FILE}.jqerr.$$" 2>/dev/null || echo "Unknown error")
+      log_error "jq error: $jq_error"
+      rm -f "$tmp_file" "$backup" "${TASKS_FILE}.jqerr.$$"
+      exit 1
     fi
   else
+    jq_error=$(cat "${TASKS_FILE}.jqerr.$$" 2>/dev/null || echo "Unknown error")
+    log_error "Failed to add task (jq command failed)"
+    log_error "jq error: $jq_error"
+    log_error "Task object preview: $(echo "$task_obj" | head -5)"
     mv "$backup" "$TASKS_FILE" 2>/dev/null
-    log_error "Failed to add task"
+    rm -f "${TASKS_FILE}.jqerr.$$"
     exit 1
   fi
 }
