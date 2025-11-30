@@ -28,7 +28,7 @@ else
   log_warn()  { echo "[WARN]  $*" >&2; }
   log_error() { echo "[ERROR] $*" >&2; }
 fi
-
+source "$SCRIPTS_DIR/task_executor.sh"
 # ---------------- Common helpers ----------------
 
 require_jq() {
@@ -173,7 +173,8 @@ cmd_run_task() {
 
   ensure_file "$TASK_EXECUTOR" "Task executor script"
   log_info "Running task '$task_id'..."
-  "$TASK_EXECUTOR" "$task_id"
+  echo "running task... '$task_id'"
+  execute_task "$task_id"
 }
 
 cmd_run_workflow() {

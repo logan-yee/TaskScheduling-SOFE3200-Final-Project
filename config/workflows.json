@@ -1,12 +1,16 @@
 {
-  "id": "workflow_001",
-  "name": "Deployment Pipeline",
-  "tasks": [
-    {"task_id": "task_001", "dependencies": []},
-    {"task_id": "task_002", "dependencies": ["task_001"]},
-    {"task_id": "task_003", "dependencies": ["task_001", "task_002"]}
-  ],
-  "retry": {
-    "max_attempts": 2
-  }
+  "workflows": [
+    {
+      "id": "workflow_laundry",
+      "name": "Laundry Workflow",
+      "tasks": [
+      {"task_id": "wash_clothes", "dependencies": []},
+      {"task_id": "dry_clothes", "dependencies": ["wash_clothes"]},
+      {"task_id": "fold_clothes", "dependencies": ["dry_clothes"]}
+      ],
+      "retry": {
+        "max_attempts": 2
+      }
+    }
+  ]
 }

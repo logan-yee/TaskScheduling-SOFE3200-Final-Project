@@ -307,12 +307,12 @@ execute_task_with_retry() {
 # Execute task (main function)
 execute_task() {
     local task_id="$1"
-    local manual_run="${2:-false}"  # true if manually triggered
+    #local manual_run="${2:-false}"  # true if manually triggered
     
     # Validate task
-    if ! validate_task "$task_id"; then
-        return 1
-    fi
+    #if ! validate_task "$task_id"; then
+    #    return 1
+    #fi
     
     # Get task details
     local task_name=$(get_task_field "$task_id" "name")
