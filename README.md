@@ -1,16 +1,29 @@
 # Task Scheduling and Workflows System
 
+A comprehensive bash-based task scheduling and workflow management system with support for recurring tasks, dependency-based workflows, error handling, retries, and email notifications.
+
+## Features
+
+- ✅ **Task Management**: Create, list, remove, and execute tasks with flexible scheduling
+- ✅ **Workflow Management**: Define workflows with task dependencies (DAG-based)
+- ✅ **Scheduling**: Support for daily, weekly, monthly, and custom cron expressions
+- ✅ **Error Handling**: Automatic retries with exponential backoff
+- ✅ **Logging**: Structured logging with rotation and per-task logs
+- ✅ **Notifications**: Email notifications on task/workflow success/failure
+- ✅ **CLI Interface**: Interactive command-line tool for managing the system
+- ✅ **Cross-Platform**: Works on Linux, macOS, and WSL
+- ✅ **Cron Integration**: Automatic cron job management
+
 ## Project Structure
 
 ```
 TaskScheduling-SOFE3200-Final-Project/
 ├── README.md                          # Project documentation
 ├── config/
-│   ├── tasks.json                     # Task definitions
+│   ├── tasks.json                     # Task definitions (array format)
 │   ├── workflows.json                 # Workflow definitions
 │   └── notifications.json             # Notification preferences
 ├── scripts/
-│   ├── scheduler.sh                   # Main scheduler daemon
 │   ├── task_executor.sh               # Task execution engine
 │   ├── workflow_engine.sh             # Workflow coordinator
 │   ├── notification.sh                # Email notification handler
@@ -26,186 +39,433 @@ TaskScheduling-SOFE3200-Final-Project/
 └── examples/                          # Example configurations
 ```
 
+## Installation
+
+### Prerequisites
+
+- Bash 4.0 or higher
+- `jq` (recommended) - for JSON parsing
+  ```bash
+  # Ubuntu/Debian
+  sudo apt-get install jq
+  
+  # macOS
+  brew install jq
+  
+  # Or use fallback parsing (limited functionality)
+  ```
+
+### Dependencies
+
+- **Email Notifications**: One of the following mail commands
+  ```bash
+  # Ubuntu/Debian
+  sudo apt-get install mailutils      # Provides 'mail' command
+  # OR
+  sudo apt-get install bsd-mailx      # Provides 'mailx' command
+  
+  # macOS (usually pre-installed)
+  # mail command is typically available
+  ```
+
+- **Cron**: Usually pre-installed on Unix-like systems
+  ```bash
+  # Verify cron is available
+  which crontab
+  ```
+
+### Setup
+
+1. Clone or download the project
+2. Make the CLI executable:
+   ```bash
+   chmod +x bin/taskctl
+   ```
+
+3. (Optional) Add to PATH for easier access:
+   ```bash
+   export PATH="$PATH:/path/to/TaskScheduling-SOFE3200-Final-Project/bin"
+   ```
+
+4. Initialize configuration (optional - files are created automatically):
+   ```bash
+   ./bin/taskctl configure
+   ```
+
+## Quick Start
+
+### 1. Add Your First Task
+
+```bash
+./bin/taskctl add-task
+```
+
+Follow the interactive prompts to create a task. Example:
+- **Task ID**: `backup_daily`
+- **Name**: `Daily Backup`
+- **Command**: `/path/to/backup.sh`
+- **Schedule**: Choose daily at 2:00 AM
+- **Retry**: 3 attempts with 60s delay
+- **Notifications**: Enable for failures
+
+### 2. List Tasks
+
+```bash
+./bin/taskctl list-tasks
+```
+
+### 3. Run a Task Manually
+
+```bash
+./bin/taskctl run-task backup_daily
+```
+
+### 4. Sync Cron Jobs
+
+After adding scheduled tasks, sync them with cron:
+
+```bash
+./bin/taskctl sync-cron
+```
+
+### 5. Check System Status
+
+```bash
+./bin/taskctl status
+```
+
+## CLI Commands
+
+### Task Management
+
+| Command | Description |
+|---------|-------------|
+| `taskctl list-tasks` | List all defined tasks |
+| `taskctl add-task` | Add a new task (interactive) |
+| `taskctl remove-task <id>` | Remove a task by ID |
+| `taskctl show-task <id>` | Show detailed task information |
+| `taskctl run-task <id>` | Execute a task manually |
+
+### Workflow Management
+
+| Command | Description |
+|---------|-------------|
+| `taskctl list-workflows` | List all defined workflows |
+| `taskctl add-workflow` | Add a new workflow (interactive) |
+| `taskctl remove-workflow <id>` | Remove a workflow by ID |
+| `taskctl show-workflow <id>` | Show detailed workflow information |
+| `taskctl run-workflow <id>` | Execute a workflow manually |
+
+### System Management
+
+| Command | Description |
+|---------|-------------|
+| `taskctl status` | Show system status and component availability |
+| `taskctl logs [id]` | View logs (specific task/workflow or all) |
+| `taskctl sync-cron` | Sync cron jobs with task schedules |
+| `taskctl test-email [recipient]` | Test email notification configuration |
+
+### Configuration
+
+| Command | Description |
+|---------|-------------|
+| `taskctl configure` | Configure notification settings (interactive) |
+
+## Configuration Files
+
+### Tasks (`config/tasks.json`)
+
+Tasks are stored as a JSON array. Each task has the following structure:
+
+```json
+[
+  {
+    "id": "task_001",
+    "name": "Daily Backup",
+    "command": "/path/to/backup.sh",
+    "schedule": {
+      "type": "daily",
+      "time": "02:00"
+    },
+    "retry": {
+      "max_attempts": 3,
+      "delay": 60
+    },
+    "notifications": {
+      "on_success": false,
+      "on_failure": true
+    }
+  }
+]
+```
+
+**Schedule Types:**
+- `manual` - Run only when manually triggered
+- `daily` - Run daily at specified time (requires `time` field)
+- `weekly` - Run weekly (requires `day` 0-6 and `time` fields)
+- `monthly` - Run monthly (requires `day` 1-31 and `time` fields)
+- `cron` - Custom cron expression (requires `cron` field)
+
+### Workflows (`config/workflows.json`)
+
+Workflows define task dependencies and execution order:
+
+```json
+{
+  "workflows": [
+    {
+      "id": "workflow_001",
+      "name": "Deployment Pipeline",
+      "tasks": [
+        {"task_id": "task_001", "dependencies": []},
+        {"task_id": "task_002", "dependencies": ["task_001"]},
+        {"task_id": "task_003", "dependencies": ["task_001", "task_002"]}
+      ],
+      "retry": {
+        "max_attempts": 2
+      }
+    }
+  ]
+}
+```
+
+**Dependency Resolution:**
+- Tasks are executed in topological order based on dependencies
+- Circular dependencies are detected and prevented
+- Independent tasks can run in parallel (future enhancement)
+
+### Notifications (`config/notifications.json`)
+
+Configure email notification recipients:
+
+```json
+{
+  "recipients": {
+    "success": ["admin@example.com"],
+    "failure": ["admin@example.com", "alerts@example.com"],
+    "default": ["admin@example.com"]
+  }
+}
+```
+
+For local testing, use your system username:
+```json
+{
+  "recipients": {
+    "default": ["your_username"]
+  }
+}
+```
+
 ## Core Components
 
-### 1. Task Scheduling System (`scripts/scheduler.sh`, `scripts/task_executor.sh`)
+### 1. Task Execution Engine (`scripts/task_executor.sh`)
 
-- Parse JSON task definitions from `config/tasks.json`
-- Support recurring patterns: daily, weekly, monthly, custom cron expressions
-- Use cron/anacron for scheduling with platform detection
-- Execute tasks via `task_executor.sh`
-- Track task status and next execution times
+- Executes tasks and captures output
+- Tracks execution state and status
+- Integrates with error handling and retries
+- Records execution logs
+- Sends notifications on completion
 
-**Task JSON Schema:**
+### 2. Workflow Engine (`scripts/workflow_engine.sh`)
 
-```json
-{
-  "id": "task_001",
-  "name": "Daily Backup",
-  "command": "/path/to/backup.sh",
-  "schedule": {
-    "type": "daily",
-    "time": "02:00"
-  },
-  "retry": {
-    "max_attempts": 3,
-    "delay": 300
-  },
-  "notifications": {
-    "on_success": true,
-    "on_failure": true
-  }
-}
-```
+- Parses workflow definitions
+- Resolves task dependencies (DAG-based)
+- Executes tasks in correct order
+- Handles workflow-level retries
+- Supports parallel execution where possible
 
-### 2. Workflow Management (`scripts/workflow_engine.sh`)
+### 3. Error Handling (`lib/error_handler.sh`)
 
-- Parse workflow definitions from `config/workflows.json`
-- Implement dependency resolution (DAG-based)
-- Execute tasks in correct order based on dependencies
-- Handle workflow-level retries and failures
-- Support parallel execution where dependencies allow
+- Retry logic with exponential backoff
+- Configurable retry policies
+- Tracks retry attempts per task/workflow
+- Logs all failures with timestamps
+- Marks tasks as permanently failed after max retries
 
-**Workflow JSON Schema:**
-
-```json
-{
-  "id": "workflow_001",
-  "name": "Deployment Pipeline",
-  "tasks": [
-    {"task_id": "task_001", "dependencies": []},
-    {"task_id": "task_002", "dependencies": ["task_001"]},
-    {"task_id": "task_003", "dependencies": ["task_001", "task_002"]}
-  ],
-  "retry": {
-    "max_attempts": 2
-  }
-}
-```
-
-### 3. Notification System (`scripts/notification.sh`)
-
-- Use system mail commands (sendmail/mailx) with platform detection
-- Send notifications on task/workflow success/failure
-- Customizable message templates
-- Support multiple recipients
-- Handle email configuration errors gracefully
-
-### 4. Error Handling and Retries (`lib/error_handler.sh`)
-
-- Implement retry logic with exponential backoff
-- Track retry attempts per task/workflow
-- Log all failures with timestamps
-- Support configurable retry policies
-- Mark tasks as permanently failed after max retries
-
-### 5. Logging System (`scripts/logger.sh`)
+### 4. Logging System (`scripts/logger.sh`)
 
 - Structured logging with timestamps
 - Separate log files per task/workflow
-- Log rotation support
-- Log levels: INFO, WARNING, ERROR, DEBUG
-- Central log directory in `logs/`
+- Log rotation (configurable size and file count)
+- Log levels: DEBUG, INFO, WARNING, ERROR
+- Central log directory: `logs/`
 
-### 6. CLI Interface (`bin/taskctl`)
+### 5. Notification System (`scripts/notification.sh`)
 
-Commands:
+- Platform-aware mail command detection
+- Supports mailx, mail, and sendmail
+- Customizable email templates
+- Multiple recipients support
+- Graceful handling of missing mail commands
 
-- `taskctl add-task` - Add new task
-- `taskctl list-tasks` - List all tasks
-- `taskctl remove-task <id>` - Remove task
-- `taskctl add-workflow` - Add new workflow
-- `taskctl list-workflows` - List workflows
-- `taskctl run-task <id>` - Execute task manually
-- `taskctl run-workflow <id>` - Execute workflow manually
-- `taskctl status` - Show system status
-- `taskctl logs <task_id>` - View task logs
-- `taskctl configure` - Configure notifications
+### 6. Cron Manager (`scripts/cron_manager.sh`)
 
-### 7. Cross-Platform Support (`lib/platform_detect.sh`)
+- Dynamic cron job installation/removal
+- Validates cron expressions
+- Syncs with task configuration
+- Platform detection (Linux, macOS, WSL)
+- Safe crontab file management
 
-- Detect OS (Linux, macOS, WSL)
-- Select appropriate mail command (mailx, sendmail, mail)
-- Choose cron vs anacron based on platform
-- Handle path differences
+### 7. Platform Detection (`lib/platform_detect.sh`)
 
-### 8. Cron/Anacron Integration (`scripts/cron_manager.sh`)
+- Detects OS (Linux, macOS, WSL)
+- Selects appropriate mail command
+- Chooses cron vs anacron
+- Handles path differences
 
-- Generate cron entries dynamically
-- Install/remove cron jobs programmatically
-- Support anacron for systems without cron
-- Validate cron syntax
-- Handle cron file management safely
+## Usage Examples
 
-## Implementation Details
+### Example 1: Daily Backup Task
+
+```bash
+# Add task
+./bin/taskctl add-task
+# Enter: backup_daily, Daily Backup, /usr/local/bin/backup.sh
+# Choose: daily schedule at 02:00
+# Enable failure notifications
+
+# Sync with cron
+./bin/taskctl sync-cron
+
+# Check status
+./bin/taskctl status
+```
+
+### Example 2: Workflow with Dependencies
+
+```bash
+# Create tasks first
+./bin/taskctl add-task  # task: build
+./bin/taskctl add-task  # task: test
+./bin/taskctl add-task  # task: deploy
+
+# Create workflow
+./bin/taskctl add-workflow
+# Enter: deployment_pipeline
+# Add tasks: build (no deps), test (depends on build), deploy (depends on test)
+
+# Run workflow
+./bin/taskctl run-workflow deployment_pipeline
+```
+
+### Example 3: View Logs
+
+```bash
+# View all logs
+./bin/taskctl logs
+
+# View specific task logs
+./bin/taskctl logs backup_daily
+```
+
+### Example 4: Test Email Configuration
+
+```bash
+# Test with default recipient
+./bin/taskctl test-email
+
+# Test with specific recipient
+./bin/taskctl test-email admin@example.com
+```
+
+## Architecture
 
 ### Task Execution Flow
 
-1. Scheduler checks for due tasks
-2. Task executor runs command and captures output/exit code
-3. Error handler processes result (retry if needed)
-4. Logger records execution details
-5. Notification system sends alerts if configured
-6. Update task status in JSON
+1. **Scheduler/Cron** triggers task execution
+2. **Task Executor** runs the command and captures output
+3. **Error Handler** processes result (retries if needed)
+4. **Logger** records execution details
+5. **Notification System** sends alerts if configured
+6. **State** is updated in execution state files
 
 ### Workflow Execution Flow
 
-1. Parse workflow dependencies
-2. Build execution order (topological sort)
-3. Execute tasks sequentially based on dependencies
-4. Handle failures and retries at workflow level
-5. Log workflow progress
-6. Send workflow completion notifications
+1. **Workflow Engine** parses workflow definition
+2. **Dependency Resolution** builds execution order (topological sort)
+3. **Task Execution** runs tasks sequentially based on dependencies
+4. **Error Handling** manages failures and retries at workflow level
+5. **Logging** records workflow progress
+6. **Notifications** sent on workflow completion
 
-### Error Handling Strategy
+## Technical Details
 
-- Capture exit codes from all commands
-- Implement retry with exponential backoff
-- Log all errors with context
-- Mark tasks as failed after max retries
-- Continue workflow execution where possible
+### JSON Format
 
-## Key Files
+- **Tasks**: Stored as array `[]` format (not `{"tasks": []}`)
+- **Workflows**: Stored as object with `workflows` array
+- **Automatic Conversion**: System automatically converts old object format to array format
 
-1. **`bin/taskctl`** - Main CLI entry point with command parsing
-2. **`scripts/scheduler.sh`** - Core scheduling daemon
-3. **`scripts/task_executor.sh`** - Task execution with error handling
-4. **`scripts/workflow_engine.sh`** - Workflow dependency resolution and execution
-5. **`scripts/notification.sh`** - Email notification using system mail
-6. **`scripts/logger.sh`** - Centralized logging functions
-7. **`scripts/cron_manager.sh`** - Cron job management
-8. **`lib/utils.sh`** - Common utility functions (JSON parsing, validation)
-9. **`lib/error_handler.sh`** - Retry logic and error management
-10. **`lib/platform_detect.sh`** - Platform detection and adaptation
-11. **`config/tasks.json`** - Task definitions (initialized empty)
-12. **`config/workflows.json`** - Workflow definitions (initialized empty)
-13. **`config/notifications.json`** - Notification preferences
-14. **`README.md`** - Comprehensive documentation
+### File Operations
 
-## Technical Considerations
+- Atomic file operations for JSON updates
+- Backup files created before modifications
+- Validation before writing
+- Safe error recovery
 
-- Use `jq` for JSON parsing (with fallback to awk/sed if unavailable)
-- Implement atomic file operations for JSON updates
-- Use file locking to prevent concurrent modifications
-- Validate JSON schemas before execution
-- Support both relative and absolute paths for commands
-- Handle special characters in commands safely
-- Implement proper signal handling (SIGTERM, SIGINT)
-- Create example configurations in `examples/` directory
+### Error Handling
 
-### To-dos
+- Exit codes captured from all commands
+- Exponential backoff for retries
+- Context-rich error logging
+- Graceful degradation when components unavailable
 
-- [x] Create project directory structure (config/, scripts/, bin/, lib/, logs/, examples/)
-- [x] Implement platform detection library (lib/platform_detect.sh) for cross-platform support
-- [x] Create utility library (lib/utils.sh) with JSON parsing, validation, and helper functions
-- [x] Implement logging system (scripts/logger.sh) with structured logging and log rotation
-- [x] Build error handling and retry system (lib/error_handler.sh) with exponential backoff
-- [x] Implement email notification system (scripts/notification.sh) using system mail commands
-- [x] Create task execution engine (scripts/task_executor.sh) with output capture and status tracking
-- [x] Build cron/anacron integration (scripts/cron_manager.sh) for dynamic job management
-- [ ] Implement main scheduler daemon (scripts/scheduler.sh) for recurring task management
-- [ ] Create workflow engine (scripts/workflow_engine.sh) with dependency resolution and execution
-- [ ] Build CLI interface (bin/taskctl) with all commands (add, list, remove, run, status, logs, configure)
-- [ ] Create initial configuration files (tasks.json, workflows.json, notifications.json) with schemas
-- [ ] Add example configurations and usage documentation in examples/ directory
-- [ ] Write comprehensive README.md with installation, usage, and examples
+## Troubleshooting
+
+### Email Notifications Not Working
+
+1. Check if mail command is available:
+   ```bash
+   which mailx mail sendmail
+   ```
+
+2. Install mail command:
+   ```bash
+   sudo apt-get install mailutils  # Ubuntu/Debian
+   ```
+
+3. Test email configuration:
+   ```bash
+   ./bin/taskctl test-email
+   ```
+
+4. Check notification config:
+   ```bash
+   cat config/notifications.json
+   ```
+
+### Cron Jobs Not Running
+
+1. Verify cron is available:
+   ```bash
+   ./bin/taskctl status
+   ```
+
+2. Sync cron jobs:
+   ```bash
+   ./bin/taskctl sync-cron
+   ```
+
+3. Check cron jobs:
+   ```bash
+   crontab -l
+   ```
+
+### Tasks Not Found
+
+1. Verify tasks.json format (should be array):
+   ```bash
+   cat config/tasks.json | jq '.'
+   ```
+
+2. List tasks:
+   ```bash
+   ./bin/taskctl list-tasks
+   ```
+
+3. The system automatically normalizes format if needed
+
+---
+
+**Note**: This system is designed for Unix-like operating systems (Linux, macOS, WSL). Windows native support is not provided, but WSL works well.
